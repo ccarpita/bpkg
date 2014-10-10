@@ -66,11 +66,25 @@ show_package () {
   local author=$(echo "$json" | bpkg-json -b | grep '"author"' | sed 's/.*author"\]\s*//' | tr -d '\t' | tr -d '"')
   local pkg_desc=$(echo "$json" | bpkg-json -b | grep '"description"' | sed 's/.*description"\]\s*//' | tr -d '\t' | tr -d '"')
   local sources=$(echo "$json" | bpkg-json -b | grep '"scripts"' | cut -f 2 | tr -d '"' )
+  local bins=$(echo -n "$json" | bpkg json -b | grep '\["bin",' | awk -F '\t|,' '{ print $2 ":" $3 }' | tr -d \"\[\])
+
   local description=$(echo "$json" | bpkg-json -b | grep '"description"')
   local install_sh=$(echo "$json" | bpkg-json -b | grep '"install"' | sed 's/.*install"\]\s*//' | tr -d '\t' | tr -d '"')
 
   if [ "$pkg_desc" != "" ]; then
     desc="$pkg_desc"
+  fi
+
+  if [ "$bins" != "" ]; then
+    OLDIFS="$IFS"
+    IFS=$'\n'
+    local bin_i=0
+    for bin in $(echo "$bins"); do
+      IFS="$OLDIFS"
+      IFS=$'\n'
+      bin_i=$(($bin_i + 1))
+    done
+    IFS="$OLDIFS"
   fi
 
   if [ "$show_sources" == '0' ] && [ "$show_readme" == "0" ]; then

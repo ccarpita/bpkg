@@ -15,6 +15,7 @@ bpkg_initrc() {
   fi
   BPKG_USER="${BPKG_USER:-"bpkg"}"
   BPKG_INDEX=${BPKG_INDEX:-"$HOME/.bpkg/index"}
+  BPKG_PREFIX=${BPKG_PREFIX:-"$HOME/.bpkg"}
 }
 
 ## check parameter consistency
@@ -116,7 +117,7 @@ bpkg_select_remote () {
 
 ## given a user and name, sets BPKG_RAW_PATH using the available
 ## BPKG_REMOTE and BPKG_OAUTH_TOKEN details
-bpkg_select_raw_path() {
+bpkg_select_raw_path () {
   local user=$1
   local name=$2
   if [ "$BPKG_OAUTH_TOKEN" == "" ]; then
@@ -124,6 +125,82 @@ bpkg_select_raw_path() {
   else
     BPKG_RAW_PATH="$BPKG_REMOTE/$user/$name/raw"
   fi
+  return 0
+}
+
+## Given JSON string, parses fields into global variables:
+##  BPKG_NEEDS_GLOBAL: set to 1 if package must be installed globally
+##  BPKG_SCRIPTS: array of script sources
+##  BPKG_BIN_SRCS: array of bin srcs
+##  BPKG_BIN_DESTS: array of bin destination corresponding to srcs
+##  BPKG_INSTALL: installation script
+##  BPKG_NAME: package name
+bpkg_parse_package_json () {
+  json=$1
+
+  # Determine if global install is required
+  BPKG_NEEDS_GLOBAL=0
+  if [ ! -z $(echo -n $json | bpkg-json -b | grep '\["global"\]' | awk '{ print $2 }' | tr -d '"') ]; then
+    BPKG_NEEDS_GLOBAL=1
+  fi
+  declare -a BPKG_SCRIPTS=()
+  declare -a BPKG_BIN_SRCS=()
+  declare -a BPKG_BIN_DESTS=()
+  BPKG_BUILD=""
+
+  ## construct scripts array
+  {
+    declare -a local scripts=()
+    scripts=$(echo -n $json | bpkg-json -b | grep '\["scripts' | awk '{$1=""; print $0 }' | tr -d '"')
+    OLDIFS="${IFS}"
+
+    ## comma to space
+    IFS=','
+    scripts=($(echo ${scripts[@]}))
+    IFS="${OLDIFS}"
+
+    ## account for existing space
+    scripts=($(echo ${scripts[@]}))
+    BPKG_SCRIPTS=$scripts
+  }
+
+  ## construct bin arrays for install
+  {
+    # bin srcs override scripts array
+    if [ ${#BPKG_SCRIPTS[@]} -gt 0 ]; then
+      bpkg_warn "scripts set, but \"bin\" spec will override scripts"
+    fi
+    BPKG_SCRIPTS=()
+    declare -a local bins=()
+    bins=$(echo -n "$json" | bpkg json -b | grep '\["bin",' | awk -F '\t|,' '{ print $2 ":" $3 }' | tr -d \"\[\])
+    if [ "$bins" != '' ]; then
+      OLDIFS="$IFS"
+      IFS=$'\n'
+      local bin_i=0
+      for bin in $(echo "$bins"); do
+        IFS="$OLDIFS"
+        BPKG_BIN_SRCS[$bin_i]=$(echo "$bin" | cut -f 2 -d:)
+        BPKG_BIN_DESTS[$bin_i]=$(echo "$bin"  | cut -f 1 -d:)
+        BPKG_SCRIPTS[$bin_i]="${bin_src[$bin_i]}"
+        IFS=$'\n'
+        bin_i=$(($bin_i + 1))
+      done
+      IFS="$OLDIFS"
+    fi
+  }
+
+  local install="$(echo -n ${json} | bpkg-json -b | grep '\["install"\]' | awk '{$1=""; print $0 }' | tr -d '\"')"
+  BPKG_INSTALL="$(echo -n ${install} | sed -e 's/^ *//' -e 's/ *$//')"
+
+  BPKG_NAME="$(
+    echo -n ${json} |
+    bpkg-json -b |
+    grep 'name' |
+    awk '{ $1=""; print $0 }' |
+    tr -d '\"' |
+    tr -d ' '
+  )"
+
   return 0
 }
 

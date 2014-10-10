@@ -1,84 +1,18 @@
 #!/bin/bash
 
-# Include config rc file if found
-CONFIG_FILE="$HOME/.bpkgrc"
-[ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
-
-## set defaults
-if [ ${#BPKG_REMOTES[@]} -eq 0 ]; then
-  BPKG_REMOTES[0]=${BPKG_REMOTE-https://raw.githubusercontent.com}
-  BPKG_GIT_REMOTES[0]=${BPKG_GIT_REMOTE-https://github.com}
+if ! type -f bpkg-utils; then
+  echo "bpkg-utils not found, aborting"
+  exit 1
 fi
-BPKG_USER="${BPKG_USER:-"bpkg"}"
+source `which bpkg-utils`
 
-## check parameter consistency
-validate_parameters () {
-  if [ ${#BPKG_GIT_REMOTES[@]} -ne ${#BPKG_REMOTES[@]} ]; then
-    mesg='BPKG_GIT_REMOTES[%d] differs in size from BPKG_REMOTES[%d] array'
-    fmesg=$(printf "$mesg" "${#BPKG_GIT_REMOTES[@]}" "${#BPKG_REMOTES[@]}")
-    error "$fmesg"
-    return 1
-  fi
-  return 0
-}
+bpkg_initrc
 
 ## outut usage
 usage () {
   echo "usage: bpkg-install [-h|--help]"
   echo "   or: bpkg-install [-g|--global] <package>"
   echo "   or: bpkg-install [-g|--global] <user>/<package>"
-}
-
-## format and output message
-message () {
-  if type -f bpkg-term > /dev/null 2>&1; then
-    bpkg-term color "${1}"
-  fi
-
-  shift
-  printf "    ${1}"
-  shift
-
-  if type -f bpkg-term > /dev/null 2>&1; then
-    bpkg-term reset
-  fi
-
-  printf ": "
-
-  if type -f bpkg-term > /dev/null 2>&1; then
-    bpkg-term reset
-    bpkg-term bright
-  fi
-
-  printf "%s\n" "${@}"
-
-  if type -f bpkg-term > /dev/null 2>&1; then
-    bpkg-term reset
-  fi
-}
-
-## output error
-error () {
-  {
-    message "red" "error" "${@}"
-  } >&2
-}
-
-## output warning
-warn () {
-  {
-    message "yellow" "warn" "${@}"
-  } >&2
-}
-
-## output info
-info () {
-  local title="info"
-  if (( "${#}" > 1 )); then
-    title="${1}"
-    shift
-  fi
-  message "cyan" "${title}" "${@}"
 }
 
 ## Install a bash package
@@ -133,12 +67,12 @@ bpkg_install () {
     if [ "$?" == "0" ]; then
       return 0
     elif [ "$?" == "2" ]; then
-      error "fatal error occurred during install"
+      bpkg_error "fatal error occurred during install"
       return 1
     fi
     i=$((i+1))
   done
-  error "package not found on any remote"
+  bpkg_error "package not found on any remote"
   return 1
 }
 
@@ -159,7 +93,6 @@ bpkg_install_from_remote () {
   local test_uri=""
   local version=""
   local status=""
-  local json=""
   local user=""
   local name=""
   local version=""
@@ -168,6 +101,8 @@ bpkg_install_from_remote () {
   declare -a local pkg_parts=()
   declare -a local remote_parts=()
   declare -a local scripts=()
+  declare -a local bin_src=()
+  declare -a local bin_dest=()
 
   ## get version if available
   {
@@ -179,12 +114,11 @@ bpkg_install_from_remote () {
 
   if [ ${#pkg_parts[@]} -eq 1 ]; then
     version="master"
-    #info "Using latest (master)"
   elif [ ${#pkg_parts[@]} -eq 2 ]; then
     name="${pkg_parts[0]}"
     version="${pkg_parts[1]}"
   else
-     error "Error parsing package version"
+     bpkg_error "Error parsing package version"
     return 1
   fi
 
@@ -203,7 +137,7 @@ bpkg_install_from_remote () {
     user="${pkg_parts[0]}"
     name="${pkg_parts[1]}"
   else
-    error "Unable to determine package name"
+    bpkg_error "Unable to determine package name"
     return 1
   fi
 
@@ -215,7 +149,7 @@ bpkg_install_from_remote () {
 
   ## check to see if remote is raw with oauth (GHE)
   if [ "${remote:0:10}" == "raw-oauth|" ]; then
-    info "Using OAUTH basic with content requests"
+    bpkg_info "Using OAUTH basic with content requests"
     OLDIFS="${IFS}"
     IFS="|"
     local remote_parts=($remote)
@@ -235,7 +169,7 @@ bpkg_install_from_remote () {
 
   ## clean up extra slashes in uri
   uri=${uri/\/\///}
-  info "Install $uri from remote $remote [$git_remote]"
+  bpkg_info "Install $uri from remote $remote [$git_remote]"
 
   ## Ensure remote is reachable
   ## If a remote is totally down, this will be considered a fatal
@@ -244,7 +178,7 @@ bpkg_install_from_remote () {
   {
     status=$(curl $auth_param -s "${remote}" -w '%{http_code}' -o /dev/null)
     if [ "0" != "$?" ] || (( status >= 400 )); then
-      error "Remote unreachable: $remote"
+      bpkg_error "Remote unreachable: $remote"
       return 2
     fi
   }
@@ -257,98 +191,85 @@ bpkg_install_from_remote () {
   {
     status=$(curl $auth_param -sL "${url}/package.json?`date +%s`" -w '%{http_code}' -o /dev/null)
     if [ "0" != "$?" ] || (( status >= 400 )); then
-      warn "package.json doesn't exist"
+      bpkg_warn "package.json doesn't exist"
       has_pkg_json=0
       # check to see if there's a Makefile. If not, this is not a valid package
       status=$(curl $auth_param -sL "${url}/Makefile?`date +%s`" -w '%{http_code}' -o /dev/null)
       if [ "0" != "$?" ] || (( status >= 400 )); then
-        warn "Makefile not found, skipping remote: $url"
+        bpkg_warn "Makefile not found, skipping remote: $url"
         return 1
       fi
     fi
   }
 
   ## read package.json
-  json=$(curl $auth_param -sL "${url}/package.json?`date +%s`")
-
   if (( 1 == $has_pkg_json )); then
-    ## check if forced global
-    if [ ! -z $(echo -n $json | bpkg-json -b | grep '\["global"\]' | awk '{ print $2 }' | tr -d '"') ]; then
+    local json=$(curl $auth_param -sL "${url}/package.json?`date +%s`")
+    if [ -z "$json" ]; then
+      bpkg_error "fatal" "package.json empty"
+      return 2
+    fi
+    bpkg_parse_package_json "$json"
+    if [ "$BPKG_NEEDS_GLOBAL" == "1" ]; then
       needs_global=1
     fi
-
-    ## construct scripts array
-    {
-      scripts=$(echo -n $json | bpkg-json -b | grep '\["scripts' | awk '{$1=""; print $0 }' | tr -d '"')
-      OLDIFS="${IFS}"
-
-      ## comma to space
-      IFS=','
-      scripts=($(echo ${scripts[@]}))
-      IFS="${OLDIFS}"
-
-      ## account for existing space
-      scripts=($(echo ${scripts[@]}))
-    }
   fi
 
   ## build global if needed
   if (( 1 == $needs_global )); then
-    if (( 1 == $has_pkg_json )); then
-      ## install bin if needed
-      build="$(echo -n ${json} | bpkg-json -b | grep '\["install"\]' | awk '{$1=""; print $0 }' | tr -d '\"')"
-      build="$(echo -n ${build} | sed -e 's/^ *//' -e 's/ *$//')"
-    fi
 
-    if [ -z "${build}" ]; then
-      warn "Missing build script"
-      warn "Trying \`make install'..."
-      build="make install"
+    if [ -z "${BPKG_INSTALL}" ] && [ ${#BPKG_BIN_SRCS[@]} -eq 0 ]; then
+      bpkg_warn "Missing build script"
+      bpkg_warn "Will attempt \`make install'..."
+      BPKG_INSTALL="make install"
     fi
 
     {(
-      ## go to tmp dir
-      cd $( [ ! -z $TMPDIR ] && echo $TMPDIR || echo /tmp) &&
-        ## prune existing
-      rm -rf ${name}-${version} &&
-        ## shallow clone
-      info "Cloning $repo_url to $name-$version"
-      git clone $repo_url ${name}-${version} &&
-        (
-      ## move into directory
-      cd ${name}-${version} &&
-        ## build
-      info "Performing install: \`${build}'"
-      build_output=$(eval "${build}")
-      echo "$build_output"
-      ) &&
-        ## clean up
-      rm -rf ${name}-${version}
+      # If bins not defined, git clone and make install
+      if [ ${#BPKG_BIN_SRCS[@]} -eq 0 ]; then
+        ## go to tmp dir
+        cd $( [ ! -z $TMPDIR ] && echo $TMPDIR || echo /tmp) &&
+          ## prune existing
+        rm -rf ${name}-${version} &&
+          ## shallow clone
+        bpkg_info "Cloning $repo_url to $name-$version"
+        git clone $repo_url ${name}-${version} &&
+          (
+        ## move into directory
+        cd ${name}-${version} &&
+          ## build
+        bpkg_info "PREFIX=$PREFIX"
+        bpkg_info "Performing install: \`${BPKG_INSTALL}'"
+        build_output=$(eval "${BPKG_INSTALL}")
+        echo "$build_output"
+        ) &&
+          ## clean up
+        rm -rf ${name}-${version}
+      else
+        for (( i = 0; i < ${#BPKG_BIN_SRCS[@]} ; ++i )); do
+          local bin_name="$(echo ${BPKG_BIN_SRCS[$i]} | xargs basename)"
+          mkdir -p "${BPKG_PREFIX}/bin"
+          local dest_path="${BPKG_PREFIX}/bin/${BPKG_BIN_DESTS[$i]}"
+          bpkg_info "install" "${url}/${bin_name} -> $dest_path"
+          curl $auth_param -sL "${url}/${bin_name}" -o "$dest_path"
+        done
+      fi
     )}
   elif [ "${#scripts[@]}" -gt "0" ]; then
-    ## get package name from `package.json'
-    name="$(
-      echo -n ${json} |
-      bpkg-json -b |
-      grep 'name' |
-      awk '{ $1=""; print $0 }' |
-      tr -d '\"' |
-      tr -d ' '
-    )"
 
     ## make `deps/' directory if possible
     mkdir -p "${cwd}/deps/${name}"
 
     ## copy package.json over
-    curl $auth_param -sL "${url}/package.json" -o "${cwd}/deps/${name}/package.json"
+    curl $auth_param -sL "${url}/package.json" -o "${cwd}/deps/${BPKG_NAME}/package.json"
 
     ## grab each script and place in deps directory
     for (( i = 0; i < ${#scripts[@]} ; ++i )); do
       (
         local script="$(echo ${scripts[$i]} | xargs basename )"
-        info "fetch" "${url}/${script}"
-        info "write" "${cwd}/deps/${name}/${script}"
-        curl $auth_param -sL "${url}/${script}" -o "${cwd}/deps/${name}/${script}"
+        bpkg_info "fetch" "${url}/${script}"
+        bpkg_info "write" "${cwd}/deps/${BPKG_NAME}/${script}"
+        curl $auth_param -sL "${url}/${script}" -o "${cwd}/deps/${BPKG_NAME}/${script}"
       )
     done
   fi
@@ -359,7 +280,7 @@ bpkg_install_from_remote () {
 ## Use as lib or perform install
 if [[ ${BASH_SOURCE[0]} != $0 ]]; then
   export -f bpkg_install
-elif validate_parameters; then
+elif bpkg_validate; then
   bpkg_install "${@}"
   exit $?
 else
