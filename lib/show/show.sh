@@ -36,69 +36,31 @@ usage () {
 
 show_package () {
   local pkg=$1
-  local desc=$2
-  local show_readme=$3
-  local show_sources=$4
-  local host=$BPKG_REMOTE_HOST
-  local remote=$BPKG_REMOTE
+  local show_readme=$2
+  local show_sources=$3
+
   local git_remote=$BPKG_GIT_REMOTE
-  local auth=""
-  local json=""
-  local readme=""
-  local uri=""
 
-  if [ "$BPKG_OAUTH_TOKEN" != "" ]; then
-    auth="-u $BPKG_OAUTH_TOKEN:x-oauth-basic"
-  fi
+  local json=$(bpkg_get_file "$pkg" package.json)
 
-  if [ "$auth" == "" ]; then
-    uri=$BPKG_REMOTE/$pkg/master
-  else
-    uri=$BPKG_REMOTE/$pkg/raw/master
-  fi
-
-  json=$(eval "curl $auth -sL '$uri/package.json?`date +%s`'")
-  readme=$(eval "curl $auth -sL '$uri/README.md?`date +%s`'")
+  local readme=$(bpkg_get_file "$pkg" README.md)
 
   local readme_len=$(echo "$readme" | wc -l | tr -d ' ')
 
-  local version=$(echo "$json" | bpkg-json -b | grep '"version"' | sed 's/.*version"\]\s*//' | tr -d '\t' | tr -d '"')
-  local author=$(echo "$json" | bpkg-json -b | grep '"author"' | sed 's/.*author"\]\s*//' | tr -d '\t' | tr -d '"')
-  local pkg_desc=$(echo "$json" | bpkg-json -b | grep '"description"' | sed 's/.*description"\]\s*//' | tr -d '\t' | tr -d '"')
-  local sources=$(echo "$json" | bpkg-json -b | grep '"scripts"' | cut -f 2 | tr -d '"' )
-  local bins=$(echo -n "$json" | bpkg json -b | grep '\["bin",' | awk -F '\t|,' '{ print $2 ":" $3 }' | tr -d \"\[\])
-
-  local description=$(echo "$json" | bpkg-json -b | grep '"description"')
-  local install_sh=$(echo "$json" | bpkg-json -b | grep '"install"' | sed 's/.*install"\]\s*//' | tr -d '\t' | tr -d '"')
-
-  if [ "$pkg_desc" != "" ]; then
-    desc="$pkg_desc"
-  fi
-
-  if [ "$bins" != "" ]; then
-    OLDIFS="$IFS"
-    IFS=$'\n'
-    local bin_i=0
-    for bin in $(echo "$bins"); do
-      IFS="$OLDIFS"
-      IFS=$'\n'
-      bin_i=$(($bin_i + 1))
-    done
-    IFS="$OLDIFS"
-  fi
+  bpkg_parse_package_json "$json"
 
   if [ "$show_sources" == '0' ] && [ "$show_readme" == "0" ]; then
     echo "Name: $pkg"
-    if [ "$author" != "" ]; then
-      echo "Author: $author"
+    if [ "$BPKG_PKG_AUTHOR" != "" ]; then
+      echo "Author: $BPKG_PKG_AUTHOR"
     fi
-    echo "Description: $desc"
-    echo "Current Version: $version"
+    echo "Description: $BPKG_PKG_DESCRIPTION"
+    echo "Current Version: $BPKG_PKG_VERSION"
     echo "Remote: $git_remote"
-    if [ "$install_sh" != "" ]; then
-      echo "Install: $install_sh"
+    if [ "$BPKG_PKG_INSTALL" != "" ]; then
+      echo "Install: $BPKG_BPKG_INSTALL"
     fi
-    if [ "$readme" == "" ]; then
+    if [ $readme_len -eq 0 ]; then
       echo "README.md: Not Available"
     else
       echo "README.md: ${readme_len} lines"
@@ -107,27 +69,26 @@ show_package () {
     echo "$readme"
   else
     # Show Sources
-    OLDIFS="$IFS"
-    IFS=$'\n'
-    for src in $(echo "$sources"); do
-      local http_code=$(eval "curl $auth -sL '$uri/$src?`date +%s`' -w '%{http_code}' -o /dev/null")
-      if (( http_code < 400 )); then
-        local content=$(eval "curl $auth -sL '$uri/$src?`date +%s`'")
+    echo "json: $json"
+    echo "scripts: ${BPKG_PKG_SCRIPTS[@]}"
+    for src in "${BPKG_PKG_SCRIPTS[@]}"; do
+      echo "SOURCE: $src"
+      local content=$(bpkg_get_file "$pkg" "$src")
+      if [ "$BPKG_GET_FILE_ERROR" == "" ]; then
         echo "#[$src]"
         echo "$content"
         echo "#[/$src]"
       else
-        bpkg_warn "source not found: $src"
+        bpkg_warn "source not found [$BPKG_GET_FILE_ERROR]"
       fi
     done
-    IFS="$OLDIFS"
   fi
 }
 
 
 bpkg_show () {
-  local readme=0
-  local sources=0
+  declare -i local readme=0
+  declare -i local sources=0
   local pkg=""
   for opt in "${@}"; do
     case "$opt" in
@@ -169,7 +130,7 @@ bpkg_show () {
     return 1
   fi
 
-  local i=0
+  declare -i local i=0
   for remote in "${BPKG_REMOTES[@]}"; do
     local git_remote="${BPKG_GIT_REMOTES[$i]}"
     bpkg_select_remote "$remote" "$git_remote"
@@ -180,19 +141,19 @@ bpkg_show () {
       continue
     fi
 
-    OLDIFS="$IFS"
-    IFS=$'\n'
-    for line in $(cat $BPKG_REMOTE_INDEX_FILE); do
+    declare -a local lines=()
+    bpkg_lines_to_array "$(cat $BPKG_REMOTE_INDEX_FILE)" lines
+    for line in "${lines[@]}"; do
       local name=$(echo "$line" | cut -d\| -f1 | tr -d ' ')
-      local desc=$(echo "$line" | cut -d\| -f2)
+      if [ "$name" == "$BPKG_USER/$pkg" ]; then
+        pkg="$BPKG_USER/$pkg"
+      fi
       if [ "$name" == "$pkg" ]; then
-        IFS="$OLDIFS"
-        show_package "$pkg" "$desc" "$readme" "$sources"
-        IFS=$'\n'
+        show_package "$pkg" "$readme" "$sources"
         return 0
       fi
     done
-    IFS="$OLDIFS"
+
     i=$((i+1))
   done
 

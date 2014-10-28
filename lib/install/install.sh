@@ -82,35 +82,27 @@ bpkg_install () {
 ##   1: the package was not found on the remote
 ##   2: a fatal error occurred
 bpkg_install_from_remote () {
-  local pkg=$1
-  local remote=$2
-  local git_remote=$3
+  local pkg="$1"
+  local remote="$2"
+  local git_remote="$3"
   local let needs_global=$4
+
+  bpkg_select_remote "$remote" "$git_remote"
 
   local cwd=$(pwd)
   local url=""
   local uri=""
-  local test_uri=""
   local version=""
-  local status=""
   local user=""
   local name=""
   local version=""
-  local auth_param=""
+  local json=""
   local let has_pkg_json=1
   declare -a local pkg_parts=()
-  declare -a local remote_parts=()
   declare -a local scripts=()
-  declare -a local bin_src=()
-  declare -a local bin_dest=()
 
   ## get version if available
-  {
-    OLDIFS="${IFS}"
-    IFS="@"
-    pkg_parts=(${pkg})
-    IFS="${OLDIFS}"
-  }
+  bpkg_string_to_array "$pkg" @ pkg_parts
 
   if [ ${#pkg_parts[@]} -eq 1 ]; then
     version="master"
@@ -122,13 +114,7 @@ bpkg_install_from_remote () {
     return 1
   fi
 
-  ## split by user name and repo
-  {
-    OLDIFS="${IFS}"
-    IFS='/'
-    pkg_parts=(${pkg})
-    IFS="${OLDIFS}"
-  }
+  bpkg_string_to_array "$pkg" '/' pkg_parts
 
   if [ ${#pkg_parts[@]} -eq 1 ]; then
     user="${BPKG_USER}"
@@ -147,78 +133,64 @@ bpkg_install_from_remote () {
   name=${name////}
 
 
-  ## check to see if remote is raw with oauth (GHE)
-  if [ "${remote:0:10}" == "raw-oauth|" ]; then
-    bpkg_info "Using OAUTH basic with content requests"
-    OLDIFS="${IFS}"
-    IFS="|"
-    local remote_parts=($remote)
-    IFS="${OLDIFS}"
-    local token=${remote_parts[1]}
-    remote=${remote_parts[2]}
-    auth_param="-u $token:x-oauth-basic"
-    uri="/${user}/${name}/raw/${version}"
-    ## If git remote is a URL, and doesn't contain token information, we
-    ## inject it into the <user>@host field
-    if [[ "$git_remote" == https://* ]] && [[ "$git_remote" != *x-oauth-basic* ]] && [[ "$git_remote" != *${token}* ]]; then
-      git_remote=${git_remote/https:\/\//https:\/\/$token:x-oauth-basic@}
-    fi
-  else
-    uri="/${user}/${name}/${version}"
-  fi
+  bpkg_select_raw_path "$user" "$name"
 
-  ## clean up extra slashes in uri
-  uri=${uri/\/\///}
-  bpkg_info "Install $uri from remote $remote [$git_remote]"
+  url="$BPKG_RAW_PATH"
+
+  bpkg_info "Install $url from remote $remote [$git_remote]"
 
   ## Ensure remote is reachable
   ## If a remote is totally down, this will be considered a fatal
   ## error since the user may have intended to install the package
   ## from the broken remote.
   {
-    status=$(curl $auth_param -s "${remote}" -w '%{http_code}' -o /dev/null)
-    if [ "0" != "$?" ] || (( status >= 400 )); then
-      bpkg_error "Remote unreachable: $remote"
-      return 2
-    fi
-  }
-
-  ## build url
-  url="${remote}${uri}"
-  repo_url=$git_remote/$user/$name.git
-
-  ## determine if `package.json' exists at url
-  {
-    status=$(curl $auth_param -sL "${url}/package.json?`date +%s`" -w '%{http_code}' -o /dev/null)
-    if [ "0" != "$?" ] || (( status >= 400 )); then
-      bpkg_warn "package.json doesn't exist"
-      has_pkg_json=0
-      # check to see if there's a Makefile. If not, this is not a valid package
-      status=$(curl $auth_param -sL "${url}/Makefile?`date +%s`" -w '%{http_code}' -o /dev/null)
-      if [ "0" != "$?" ] || (( status >= 400 )); then
-        bpkg_warn "Makefile not found, skipping remote: $url"
-        return 1
+    bpkg_get_file "$user/$name" "README.md" master >/dev/null
+    if [ -n "$BPKG_GET_FILE_ERROR" ]; then
+      bpkg_get_file "$user/$name" "package.json" master >/dev/null
+      if [ -n "$BPKG_GET_FILE_ERROR" ]; then
+        echo "$BPKG_GET_FILE_ERROR"
+        bpkg_error "Remote unreachable: $remote"
+        return 2
       fi
     fi
   }
 
+  ## build url
+  repo_url=$git_remote/$user/$name.git
+
+  ## determine if `package.json' exists at url
+  {
+    json=$(bpkg_get_file "$user/$name" 'package.json' "$version")
+    if [ -n "$BPKG_GET_FILE_ERROR" ]; then
+      bpkg_warn "package.json doesn't exist"
+      has_pkg_json=0
+      # check to see if there's a Makefile. If not, this is not a valid package
+      makefile=$(bpkg_get_file "$user/$name" 'Makefile' "$version")
+      if [ -n "$BPKG_GET_FILE_ERROR" ]; then
+        bpkg_warn "Makefile not found, skipping remote: $url"
+        return 1
+      fi
+    fi
+
+  }
+
   ## read package.json
   if (( 1 == $has_pkg_json )); then
-    local json=$(curl $auth_param -sL "${url}/package.json?`date +%s`")
     if [ -z "$json" ]; then
       bpkg_error "fatal" "package.json empty"
       return 2
     fi
     bpkg_parse_package_json "$json"
-    if [ "$BPKG_NEEDS_GLOBAL" == "1" ]; then
+    if [ "$BPKG_PKG_NEEDS_GLOBAL" == "1" ]; then
       needs_global=1
     fi
+    scripts=$BPKG_PKG_SCRIPTS
   fi
 
   ## build global if needed
   if (( 1 == $needs_global )); then
 
-    if [ -z "${BPKG_INSTALL}" ] && [ ${#BPKG_BIN_SRCS[@]} -eq 0 ]; then
+    if [ -z "${BPKG_PKG_INSTALL}" ] && [ ${#BPKG_PKG_BIN_SRCS[@]} -eq 0 ]; then
       bpkg_warn "Missing build script"
       bpkg_warn "Will attempt \`make install'..."
       BPKG_INSTALL="make install"
@@ -226,7 +198,7 @@ bpkg_install_from_remote () {
 
     {(
       # If bins not defined, git clone and make install
-      if [ ${#BPKG_BIN_SRCS[@]} -eq 0 ]; then
+      if [ ${#BPKG_PKG_BIN_SRCS[@]} -eq 0 ]; then
         ## go to tmp dir
         cd $( [ ! -z $TMPDIR ] && echo $TMPDIR || echo /tmp) &&
           ## prune existing
@@ -246,12 +218,13 @@ bpkg_install_from_remote () {
           ## clean up
         rm -rf ${name}-${version}
       else
-        for (( i = 0; i < ${#BPKG_BIN_SRCS[@]} ; ++i )); do
-          local bin_name="$(echo ${BPKG_BIN_SRCS[$i]} | xargs basename)"
+        for (( i = 0; i < ${#BPKG_PKG_BIN_SRCS[@]} ; ++i )); do
+          local bin_name="$(echo ${BPKG_PKG_BIN_SRCS[$i]} | xargs basename)"
           mkdir -p "${BPKG_PREFIX}/bin"
-          local dest_path="${BPKG_PREFIX}/bin/${BPKG_BIN_DESTS[$i]}"
+          local dest_path="${BPKG_PREFIX}/bin/${BPKG_PKG_BIN_DESTS[$i]}"
           bpkg_info "install" "${url}/${bin_name} -> $dest_path"
-          curl $auth_param -sL "${url}/${bin_name}" -o "$dest_path"
+          bpkg_get_file "$user/$name" "$bin_name" "$version" "$dest_path"
+          chmod 0755 "$dest_path"
         done
       fi
     )}
@@ -261,15 +234,14 @@ bpkg_install_from_remote () {
     mkdir -p "${cwd}/deps/${name}"
 
     ## copy package.json over
-    curl $auth_param -sL "${url}/package.json" -o "${cwd}/deps/${BPKG_NAME}/package.json"
-
+    bpkg_get_file "$user/$name" 'package.json' "$version" "${cwd}/deps/$BPKG_PKG_NAME/package.json"
     ## grab each script and place in deps directory
     for (( i = 0; i < ${#scripts[@]} ; ++i )); do
       (
         local script="$(echo ${scripts[$i]} | xargs basename )"
         bpkg_info "fetch" "${url}/${script}"
-        bpkg_info "write" "${cwd}/deps/${BPKG_NAME}/${script}"
-        curl $auth_param -sL "${url}/${script}" -o "${cwd}/deps/${BPKG_NAME}/${script}"
+        bpkg_info "write" "${cwd}/deps/${BPKG_PKG_NAME}/${script}"
+        bpkg_get_file "$user/$name" "${script}" "$version" -o "${cwd}/deps/${BPKG_PKG_NAME}/${script}"
       )
     done
   fi
